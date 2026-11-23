@@ -39,7 +39,7 @@ struct Row {
     notice: Option<(bool, String)>,
 }
 #[derive(Clone, Copy, PartialEq)]
-enum Status { Update, Installed, NotInstalled, NotPublished, OtherOs, Android, Problem }
+enum Status { Update, Installed, NotInstalled, NotPublished, OtherOs, Android, Problem, Locked }
 impl Row {
     /// private app that the launcher cannot see yet: it stays hidden until a license code opens it
     fn locked(&self) -> bool { matches!(&self.fetch, Fetch::Err(e) if github::is_locked(e)) }
@@ -47,6 +47,7 @@ impl Row {
     fn has_asset(&self) -> bool { match &self.fetch { Fetch::Ok(r) => github::pick_asset(r, if self.app.is_android() { "android" } else { catalog::os() }).is_some(), _ => false } }
     fn latest_tag(&self) -> Option<&str> { if let Fetch::Ok(r) = &self.fetch { Some(&r.tag_name) } else { None } }
     fn status(&self) -> Status {
+        if self.locked() { return Status::Locked; }
         if self.app.is_android() { return if matches!(self.fetch, Fetch::Err(_)) { Status::Problem } else { Status::Android }; }
         if !self.app.runs_here() { return Status::OtherOs; }
         if let Some(f) = &self.found {
@@ -66,10 +67,11 @@ fn status_label(s: Status, app: &AppDef) -> (String, Color32) {
         Status::OtherOs => (format!("{} only", app.platforms.iter().map(|p| match p.as_str() { "windows" => "Windows", "macos" => "macOS", o => o }).collect::<Vec<_>>().join(" / ")), Color32::from_rgb(160, 160, 170)),
         Status::Android => ("Android app".into(), Color32::from_rgb(185, 164, 255)),
         Status::Problem => ("Cannot check".into(), Color32::from_rgb(255, 84, 112)),
+        Status::Locked => ("Locked".into(), Color32::from_rgb(160, 160, 170)),
     }
 }
 
-enum Act { Install(usize), Open(usize), Reveal(usize) }
+enum Act { Install(usize), Open(usize), Reveal(usize), Settings }
 
 struct App {
     cfg: Config,
@@ -143,6 +145,7 @@ impl App {
     fn act(&mut self, a: Act) {
         match a {
             Act::Open(i) => { let r = &mut self.rows[i]; r.notice = None; if let Some(f) = &r.found { if let Err(e) = install::open(f) { r.notice = Some((true, e)); } } }
+            Act::Settings => { self.settings = true; }
             Act::Reveal(i) => { if let Some(f) = &self.rows[i].found { install::reveal(&f.path); } }
             Act::Install(i) => {
                 let r = &mut self.rows[i];
@@ -202,13 +205,29 @@ fn style(ctx: &egui::Context, dark: bool) {
 
 fn pal_accent() -> Color32 { Color32::from_rgb(255, 176, 112) }
 fn accent(app: &AppDef) -> Color32 { Color32::from_rgb(app.accent[0], app.accent[1], app.accent[2]) }
-fn tile(ui: &mut egui::Ui, app: &AppDef, tex: Option<&TextureHandle>, size: f32) {
+/// the Lucide "lock" icon (lucide.dev, ISC licence), drawn on its 24 x 24 grid
+fn lock_icon(p: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let s = size / 24.0; let o = center - Vec2::splat(12.0 * s); let q = |x: f32, y: f32| egui::pos2(o.x + x * s, o.y + y * s);
+    let st = Stroke::new(2.0 * s, color);
+    p.rect_stroke(egui::Rect::from_min_max(q(3.0, 11.0), q(21.0, 22.0)), (2.0 * s) as u8, st, egui::StrokeKind::Middle);
+    let mut pts = vec![q(7.0, 11.0), q(7.0, 7.0)];
+    for k in 0..=12 { let a = std::f32::consts::PI + std::f32::consts::PI * k as f32 / 12.0; pts.push(q(12.0 + 5.0 * a.cos(), 7.0 + 5.0 * a.sin())); }
+    pts.extend([q(17.0, 7.0), q(17.0, 11.0)]);
+    p.add(egui::Shape::line(pts, st));
+}
+fn lock_chip(ui: &mut egui::Ui, text: &str, c: Color32) {
+    egui::Frame::new().fill(c.gamma_multiply(0.16)).corner_radius(10).inner_margin(egui::Margin::symmetric(9, 3)).show(ui, |ui| {
+        ui.horizontal(|ui| { let (r, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover()); lock_icon(ui.painter(), r.center(), 13.0, c); ui.label(RichText::new(text).color(c).size(12.5).strong()); });
+    });
+}
+fn tile(ui: &mut egui::Ui, app: &AppDef, tex: Option<&TextureHandle>, size: f32) -> egui::Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     if let Some(t) = tex { egui::Image::new(t).corner_radius((size * 0.24) as u8).paint_at(ui, rect); }
     else {
         ui.painter().rect_filled(rect, (size * 0.24) as u8, accent(app));
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, app.letter(), FontId::proportional(size * 0.5), Color32::from_rgb(24, 22, 24));
     }
+    rect
 }
 fn chip(ui: &mut egui::Ui, text: &str, c: Color32) {
     egui::Frame::new().fill(c.gamma_multiply(0.16)).corner_radius(10).inner_margin(egui::Margin::symmetric(9, 3)).show(ui, |ui| { ui.label(RichText::new(text).color(c).size(12.5).strong()); });
@@ -226,6 +245,7 @@ fn buttons(ui: &mut egui::Ui, i: usize, r: &Row, acts: &mut Vec<Act>) {
         Status::Update => { if ui.add(primary("Update", c)).clicked() { acts.push(Act::Install(i)); } if ui.button("Open").clicked() { acts.push(Act::Open(i)); } }
         Status::NotInstalled => { if ui.add_enabled(can && r.has_asset(), primary("Install", c)).clicked() { acts.push(Act::Install(i)); } }
         Status::Android => { if ui.add_enabled(can, primary("Download APK", c)).clicked() { acts.push(Act::Install(i)); } }
+        Status::Locked => { if ui.button("Enter license code").clicked() { acts.push(Act::Settings); } }
         Status::Problem => { ui.add_enabled(false, egui::Button::new("Unavailable")); }
         Status::NotPublished | Status::OtherOs => { ui.add_enabled(false, egui::Button::new("Not available")); }
     }
@@ -236,11 +256,15 @@ fn card(ui: &mut egui::Ui, i: usize, r: &Row, w: f32, dark: bool, tex: Option<&T
     egui::Frame::new().fill(panel).stroke(Stroke::new(1.0, line)).corner_radius(14).inner_margin(16).show(ui, |ui| {
         ui.set_width(w - 34.0); ui.set_min_height(236.0);
         ui.vertical(|ui| {
+        let locked = r.status() == Status::Locked;
+        let mut badge: Option<egui::Rect> = None;
+        if locked { ui.set_opacity(0.5); }
         ui.horizontal(|ui| {
-            tile(ui, &r.app, tex, 52.0);
+            let tr = tile(ui, &r.app, tex, 52.0);
+            if locked { badge = Some(tr); }
             ui.vertical(|ui| {
                 ui.label(RichText::new(&r.app.name).size(19.0).strong());
-                let (t, c) = status_label(r.status(), &r.app); chip(ui, &t, c);
+                let (t, c) = status_label(r.status(), &r.app); if locked { lock_chip(ui, &t, c); } else { chip(ui, &t, c); }
             });
         });
         ui.add_space(4.0);
@@ -253,13 +277,15 @@ fn card(ui: &mut egui::Ui, i: usize, r: &Row, w: f32, dark: bool, tex: Option<&T
             (Some(v), None) => format!("Installed {v}"),
             (None, Some(l)) if !r.has_asset() => format!("The latest release ({l}) has no download for this computer"),
             (None, Some(l)) => format!("Latest {l}{}", if let Fetch::Ok(x) = &r.fetch { format!("  ·  {}", date(x)) } else { String::new() }),
-            _ => match &r.fetch { Fetch::Loading => "Checking for updates…".to_string(), Fetch::Err(e) => e.clone(), _ => String::new() },
+            _ => match &r.fetch { Fetch::Loading => "Checking for updates…".to_string(), Fetch::Err(_) if locked => "Locked: enter a license code to unlock this app".to_string(), Fetch::Err(e) => e.clone(), _ => String::new() },
         };
         if !line1.is_empty() { ui.label(RichText::new(line1).size(12.5).color(if matches!(r.fetch, Fetch::Err(_)) && inst.is_none() { Color32::from_rgb(255, 120, 140) } else { dim })); }
         if let Some(j) = &r.job { ui.add(egui::ProgressBar::new(j.frac).text(j.text.clone()).fill(accent(&r.app))); }
         if let Some((bad, n)) = &r.notice { ui.label(RichText::new(n).size(12.5).color(if *bad { Color32::from_rgb(255, 120, 140) } else { Color32::from_rgb(76, 217, 163) })); }
         else if let Some(n) = &r.app.note { if matches!(r.status(), Status::NotPublished | Status::OtherOs | Status::Problem | Status::Android) { ui.label(RichText::new(n).size(12.0).color(dim)); } }
         ui.add_space(6.0);
+        if locked { ui.set_opacity(1.0); }
+        if let Some(tr) = badge { let c = tr.right_bottom() - Vec2::new(4.0, 4.0); ui.painter().circle_filled(c, 12.0, panel); ui.painter().circle_stroke(c, 12.0, Stroke::new(1.5, accent(&r.app))); lock_icon(ui.painter(), c, 15.0, accent(&r.app)); }
         ui.horizontal(|ui| buttons(ui, i, r, acts));
         });
     });
@@ -292,10 +318,8 @@ impl eframe::App for App {
             });
         });
         egui::TopBottomPanel::bottom("foot").frame(egui::Frame::new().fill(palette(dark).0).inner_margin(egui::Margin::symmetric(20, 8))).show(ctx, |ui| {
-            let hidden = self.rows.iter().filter(|r| r.locked()).count();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Box Launcher {}  ·  downloads are checked against the release's SHA-256 file  ·  data folder {}", env!("CARGO_PKG_VERSION"), cfg::home().display())).size(11.5).color(dim));
-                if hidden > 0 { ui.label(RichText::new(format!("·  {hidden} more app{} unlock with a license code", if hidden == 1 { "" } else { "s" })).size(11.5).color(pal_accent())); if ui.small_button("Enter code").clicked() { self.settings = true; } }
             });
         });
 
@@ -308,7 +332,7 @@ impl eframe::App for App {
                     let cols = (((avail + gap) / (300.0 + gap)).floor() as usize).max(1);
                     let w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).clamp(290.0, 460.0);
                     ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
-                    let vis: Vec<usize> = (0..self.rows.len()).filter(|i| !self.rows[*i].locked()).collect();
+                    let vis: Vec<usize> = (0..self.rows.len()).collect();
                     for chunk in vis.chunks(cols) {
                         ui.horizontal_top(|ui| {
                             for &i in chunk {
@@ -319,7 +343,7 @@ impl eframe::App for App {
                         });
                     }
                 } else {
-                    let mut order: Vec<usize> = (0..self.rows.len()).filter(|i| !self.rows[*i].locked()).collect();
+                    let mut order: Vec<usize> = (0..self.rows.len()).collect();
                     let sort = self.sort;
                     order.sort_by_key(|&i| { let r = &self.rows[i]; match sort { 1 => format!("{}", r.status() as u8), 2 => r.found.as_ref().and_then(|f| f.version.clone()).unwrap_or_default(), 3 => r.latest_tag().unwrap_or("").to_string(), _ => r.app.name.to_lowercase() } });
                     egui::Grid::new("tbl").num_columns(6).spacing([22.0, 14.0]).striped(true).min_col_width(70.0).show(ui, |ui| {

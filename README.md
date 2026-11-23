@@ -8,7 +8,7 @@ A small native app (Rust + egui, no web view), like the ArtCraft Launcher it is 
   downloads it and checks it against the release's `SHA256SUMS.txt` before installing. A file that does not match is deleted and nothing is installed.
 - **Open** an installed app, or show it in Finder / Explorer.
 - Apps without a public release for this computer yet (PaperBox, NodeBox, and DriveBox on a Mac) are listed and opened from the copy installed here. DriveBox runs on Windows and macOS.
-- **Private apps** (LinkedBox) stay hidden until you enter a **license code** under Settings (it is a GitHub access token underneath). It is kept in `~/.boxlauncher/config.json` (readable only by you) and sent only to `api.github.com`.
+- **Private apps** (LinkedBox) are shown locked (greyed, with a lock icon) until you enter a **license code** under Settings (it is a GitHub access token underneath). It is kept in `~/.boxlauncher/config.json` (readable only by you) and sent only to `api.github.com`.
   The `GITHUB_TOKEN` variable and the GitHub CLI login (opt-in) also work.
 - Dark / light theme in the suite colours.
 
@@ -30,3 +30,5 @@ Needs Rust 1.85+. Windows: `cargo build --release` gives `boxlauncher.exe`; an M
 Launcher self-update, tray icon, languages, Linux packaging, a Windows installer, and installing on Windows has not been tried on a real Windows PC.
 
 MIT licence.
+
+The lock icon is from [Lucide](https://lucide.dev) (ISC licence), drawn in code.

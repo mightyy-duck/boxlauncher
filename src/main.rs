@@ -41,12 +41,16 @@ struct Row {
 #[derive(Clone, Copy, PartialEq)]
 enum Status { Update, Installed, NotInstalled, NotPublished, OtherOs, Android, Problem }
 impl Row {
+    /// private app that the launcher cannot see yet: it stays hidden until a license code opens it
+    fn locked(&self) -> bool { matches!(&self.fetch, Fetch::Err(e) if github::is_locked(e)) }
+    /// does the newest release have a file for this computer?
+    fn has_asset(&self) -> bool { match &self.fetch { Fetch::Ok(r) => github::pick_asset(r, if self.app.is_android() { "android" } else { catalog::os() }).is_some(), _ => false } }
     fn latest_tag(&self) -> Option<&str> { if let Fetch::Ok(r) = &self.fetch { Some(&r.tag_name) } else { None } }
     fn status(&self) -> Status {
         if self.app.is_android() { return if matches!(self.fetch, Fetch::Err(_)) { Status::Problem } else { Status::Android }; }
         if !self.app.runs_here() { return Status::OtherOs; }
         if let Some(f) = &self.found {
-            if let (Some(l), Some(v)) = (self.latest_tag(), &f.version) { if github::newer(l, v) { return Status::Update; } }
+            if let (Some(l), Some(v)) = (self.latest_tag(), &f.version) { if self.has_asset() && github::newer(l, v) { return Status::Update; } }
             return Status::Installed;
         }
         if self.app.repo.is_none() { return Status::NotPublished; }
@@ -196,6 +200,7 @@ fn style(ctx: &egui::Context, dark: bool) {
     ctx.style_mut(|s| { s.spacing.item_spacing = Vec2::new(10.0, 8.0); s.spacing.button_padding = Vec2::new(14.0, 7.0); });
 }
 
+fn pal_accent() -> Color32 { Color32::from_rgb(255, 176, 112) }
 fn accent(app: &AppDef) -> Color32 { Color32::from_rgb(app.accent[0], app.accent[1], app.accent[2]) }
 fn tile(ui: &mut egui::Ui, app: &AppDef, tex: Option<&TextureHandle>, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
@@ -219,7 +224,7 @@ fn buttons(ui: &mut egui::Ui, i: usize, r: &Row, acts: &mut Vec<Act>) {
     match r.status() {
         Status::Installed => { if ui.add(primary("Open", c)).clicked() { acts.push(Act::Open(i)); } if ui.button("Show").clicked() { acts.push(Act::Reveal(i)); } }
         Status::Update => { if ui.add(primary("Update", c)).clicked() { acts.push(Act::Install(i)); } if ui.button("Open").clicked() { acts.push(Act::Open(i)); } }
-        Status::NotInstalled => { if ui.add_enabled(can, primary("Install", c)).clicked() { acts.push(Act::Install(i)); } }
+        Status::NotInstalled => { if ui.add_enabled(can && r.has_asset(), primary("Install", c)).clicked() { acts.push(Act::Install(i)); } }
         Status::Android => { if ui.add_enabled(can, primary("Download APK", c)).clicked() { acts.push(Act::Install(i)); } }
         Status::Problem => { ui.add_enabled(false, egui::Button::new("Unavailable")); }
         Status::NotPublished | Status::OtherOs => { ui.add_enabled(false, egui::Button::new("Not available")); }
@@ -243,8 +248,10 @@ fn card(ui: &mut egui::Ui, i: usize, r: &Row, w: f32, dark: bool, tex: Option<&T
         ui.add_space(4.0);
         let inst = r.found.as_ref().and_then(|f| f.version.clone());
         let line1 = match (&inst, r.latest_tag()) {
+            (Some(v), Some(l)) if !r.has_asset() => format!("Installed {v}  ·  no newer download for this computer"),
             (Some(v), Some(l)) => format!("Installed {v}  ·  latest {l}"),
             (Some(v), None) => format!("Installed {v}"),
+            (None, Some(l)) if !r.has_asset() => format!("The latest release ({l}) has no download for this computer"),
             (None, Some(l)) => format!("Latest {l}{}", if let Fetch::Ok(x) = &r.fetch { format!("  ·  {}", date(x)) } else { String::new() }),
             _ => match &r.fetch { Fetch::Loading => "Checking for updates…".to_string(), Fetch::Err(e) => e.clone(), _ => String::new() },
         };
@@ -285,7 +292,11 @@ impl eframe::App for App {
             });
         });
         egui::TopBottomPanel::bottom("foot").frame(egui::Frame::new().fill(palette(dark).0).inner_margin(egui::Margin::symmetric(20, 8))).show(ctx, |ui| {
-            ui.label(RichText::new(format!("Box Launcher {}  ·  downloads are checked against the release's SHA-256 file  ·  data folder {}", env!("CARGO_PKG_VERSION"), cfg::home().display())).size(11.5).color(dim));
+            let hidden = self.rows.iter().filter(|r| r.locked()).count();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Box Launcher {}  ·  downloads are checked against the release's SHA-256 file  ·  data folder {}", env!("CARGO_PKG_VERSION"), cfg::home().display())).size(11.5).color(dim));
+                if hidden > 0 { ui.label(RichText::new(format!("·  {hidden} more app{} unlock with a license code", if hidden == 1 { "" } else { "s" })).size(11.5).color(pal_accent())); if ui.small_button("Enter code").clicked() { self.settings = true; } }
+            });
         });
 
         let table = self.cfg.table;
@@ -297,16 +308,18 @@ impl eframe::App for App {
                     let cols = (((avail + gap) / (300.0 + gap)).floor() as usize).max(1);
                     let w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).clamp(290.0, 460.0);
                     ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
-                    for (ci, chunk) in self.rows.chunks(cols).enumerate() {
+                    let vis: Vec<usize> = (0..self.rows.len()).filter(|i| !self.rows[*i].locked()).collect();
+                    for chunk in vis.chunks(cols) {
                         ui.horizontal_top(|ui| {
-                            for (k, r) in chunk.iter().enumerate() {
+                            for &i in chunk {
+                                let r = &self.rows[i];
                                 let tex = r.app.icon.as_ref().and_then(|n| self.tex.get(n));
-                                card(ui, ci * cols + k, r, w, dark, tex, &mut acts);
+                                card(ui, i, r, w, dark, tex, &mut acts);
                             }
                         });
                     }
                 } else {
-                    let mut order: Vec<usize> = (0..self.rows.len()).collect();
+                    let mut order: Vec<usize> = (0..self.rows.len()).filter(|i| !self.rows[*i].locked()).collect();
                     let sort = self.sort;
                     order.sort_by_key(|&i| { let r = &self.rows[i]; match sort { 1 => format!("{}", r.status() as u8), 2 => r.found.as_ref().and_then(|f| f.version.clone()).unwrap_or_default(), 3 => r.latest_tag().unwrap_or("").to_string(), _ => r.app.name.to_lowercase() } });
                     egui::Grid::new("tbl").num_columns(6).spacing([22.0, 14.0]).striped(true).min_col_width(70.0).show(ui, |ui| {
@@ -333,13 +346,20 @@ impl eframe::App for App {
         if self.settings {
             let mut open = true;
             egui::Window::new("Settings").open(&mut open).collapsible(false).default_width(440.0).show(ctx, |ui| {
-                ui.label(RichText::new("GitHub access (for private repositories)").strong());
-                ui.label(RichText::new("LinkedBox lives in private repositories. A token that can read them lets the launcher see and download their releases. It is stored only in a file in the data folder that only you can read, and is sent only to api.github.com.").size(12.5).color(dim));
-                let mut changed = ui.add(egui::TextEdit::singleline(&mut self.cfg.token).password(true).hint_text("ghp_… or github_pat_…").desired_width(f32::INFINITY)).changed();
-                changed |= ui.checkbox(&mut self.cfg.use_gh, "Also use my GitHub CLI login (gh auth token)").changed();
-                ui.label(RichText::new("The GITHUB_TOKEN environment variable is used too, if set.").size(12.0).color(dim));
+                ui.label(RichText::new("License code").strong());
+                ui.label(RichText::new("Some apps of the suite are private. They stay hidden until you enter a license code that opens them. The code is stored only in a file in the data folder that only you can read, and is sent only to github.com.").size(12.5).color(dim));
+                let mut go = false;
+                let te = ui.add(egui::TextEdit::singleline(&mut self.cfg.token).password(true).hint_text("your license code").desired_width(f32::INFINITY));
+                if te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) { go = true; }
+                let mut changed = te.changed();
+                changed |= ui.checkbox(&mut self.cfg.use_gh, "Also use the GitHub login already on this Mac (gh)").changed();
+                ui.label(RichText::new("The GITHUB_TOKEN environment variable counts as a license code too, if set.").size(12.0).color(dim));
                 if changed { self.cfg.save(); }
-                if ui.button("Check releases again").clicked() { self.refresh_releases(); }
+                if ui.add(primary("Unlock", pal_accent())).clicked() { go = true; }
+                if go { self.cfg.save(); self.refresh_releases(); }
+                let hidden = self.rows.iter().filter(|r| r.locked()).count();
+                let has_code = self.cfg.github_token().is_some();
+                if has_code && !busy { ui.label(RichText::new(if hidden == 0 { "License code accepted: all apps are unlocked.".to_string() } else { format!("The code did not open {hidden} app{}.", if hidden == 1 { "" } else { "s" }) }).color(if hidden == 0 { Color32::from_rgb(76, 217, 163) } else { Color32::from_rgb(255, 120, 140) })); }
                 ui.separator();
                 ui.label(RichText::new("The list of apps").strong());
                 ui.label(RichText::new(format!("Built in. Put a catalog.json in {} to replace it (same format as the built-in one).", cfg::home().display())).size(12.5).color(dim));

@@ -22,6 +22,9 @@ pub struct Release {
     pub assets: Vec<Asset>,
 }
 
+/// true when the answer means "this app is private and needs a license code"
+pub fn is_locked(msg: &str) -> bool { msg.starts_with("not found") || msg.starts_with("repository not found") || msg.contains("was refused") }
+
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new().user_agent("boxlauncher").timeout_connect(std::time::Duration::from_secs(15)).build()
 }
@@ -35,9 +38,9 @@ pub fn latest(repo: &str, token: Option<&str>) -> Result<Release, String> {
             let list: Vec<Release> = r.into_json().map_err(|e| format!("unreadable answer: {e}"))?;
             list.into_iter().find(|x| !x.draft).ok_or_else(|| "no releases published yet".to_string())
         }
-        Err(ureq::Error::Status(404, _)) => Err(if token.is_some() { "repository not found (check the token can read it)".into() } else { "not found: a private repository needs a GitHub token (Settings)".into() }),
-        Err(ureq::Error::Status(401, _)) => Err("the GitHub token was refused".into()),
-        Err(ureq::Error::Status(403, _)) => Err("GitHub refused the request (rate limit? add a token in Settings)".into()),
+        Err(ureq::Error::Status(404, _)) => Err(if token.is_some() { "repository not found: this license code cannot open it".into() } else { "not found: needs a license code (Settings)".into() }),
+        Err(ureq::Error::Status(401, _)) => Err("the license code was refused".into()),
+        Err(ureq::Error::Status(403, _)) => Err("GitHub refused the request (too many requests?), try again later".into()),
         Err(ureq::Error::Status(c, _)) => Err(format!("GitHub answered {c}")),
         Err(e) => Err(format!("no connection: {e}")),
     }

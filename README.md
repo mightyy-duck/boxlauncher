@@ -7,8 +7,8 @@ A small native app (Rust + egui, no web view), like the ArtCraft Launcher it is 
 - **Install / Update** from the app's GitHub releases: picks the right file for the OS (`.dmg` on macOS, `.msi` / `.exe` / portable `.zip` on Windows, `.apk` for the phone app),
   downloads it and checks it against the release's `SHA256SUMS.txt` before installing. A file that does not match is deleted and nothing is installed.
 - **Open** an installed app, or show it in Finder / Explorer.
-- Apps without a public release yet (PaperBox, NodeBox) are listed and opened from the copy on this computer.
-- **Private repositories** (LinkedBox): add a GitHub token under Settings. It is kept in `~/.boxlauncher/config.json` (readable only by you) and sent only to `api.github.com`.
+- Apps without a public release for this computer yet (PaperBox, NodeBox, and DriveBox on a Mac) are listed and opened from the copy installed here. DriveBox runs on Windows and macOS.
+- **Private apps** (LinkedBox) stay hidden until you enter a **license code** under Settings (it is a GitHub access token underneath). It is kept in `~/.boxlauncher/config.json` (readable only by you) and sent only to `api.github.com`.
   The `GITHUB_TOKEN` variable and the GitHub CLI login (opt-in) also work.
 - Dark / light theme in the suite colours.
 

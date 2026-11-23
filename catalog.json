@@ -1,0 +1,17 @@
+[
+  { "id": "paperbox", "name": "PaperBox", "tagline": "Desktop whiteboard for sketches, diagrams and maps.",
+    "accent": [244, 224, 122], "icon": "paperbox", "platforms": ["macos"], "mac_app": "PaperBox.app",
+    "note": "No public releases yet. Opens the copy installed on this computer." },
+  { "id": "linkedbox", "name": "LinkedBox", "tagline": "Control your Windows PC from your phone: volume, media, cursor, apps, power.",
+    "accent": [86, 168, 240], "icon": "linkedbox", "repo": "mightyy-duck/linkedbox", "platforms": ["windows"], "win_exe": "PortalAgent.exe",
+    "note": "Windows tray agent (formerly Portal Agent). The repository is private: add a GitHub token in Settings." },
+  { "id": "linkedbox-phone", "name": "LinkedBox for phone", "tagline": "The phone app that pairs with the LinkedBox agent.",
+    "accent": [120, 205, 190], "icon": "linkedbox", "repo": "mightyy-duck/linkedbox-app", "platforms": ["android"],
+    "note": "Android package (APK). The launcher downloads and checks it; you install it on the phone. Private repository." },
+  { "id": "drivebox", "name": "DriveBox", "tagline": "Disk usage dashboard: partition and folder maps, charts, temperatures.",
+    "accent": [255, 176, 112], "icon": "drivebox", "repo": "mightyy-duck/drivebox", "platforms": ["windows"], "win_exe": "PartiChart.exe",
+    "note": "Windows app (formerly PartiChart)." },
+  { "id": "nodebox", "name": "NodeBox", "tagline": "See how a Node project really works: routes, data flows and call chains.",
+    "accent": [255, 123, 98], "icon": "nodebox", "platforms": ["macos", "windows"], "mac_app": "NodeBox.app", "win_exe": "NodeBox.exe",
+    "note": "No public releases yet. Opens the copy installed on this computer." }
+]

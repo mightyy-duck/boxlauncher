@@ -104,9 +104,10 @@ pub fn sums_asset(r: &Release) -> Option<&Asset> {
     r.assets.iter().find(|a| { let n = a.name.to_lowercase(); n.starts_with("sha256sums") || n == "checksums.txt" })
 }
 
-/// which asset to install on `os` ("macos", "windows", "android"), best first
+/// which asset to install on `os` ("macos", "windows", "android"), best first.
+/// Windows prefers the portable zip: it needs no administrator rights and works on PCs that do not allow .msi installers.
 pub fn pick_asset<'a>(r: &'a Release, os: &str) -> Option<&'a Asset> {
-    let ext_rank: &[&str] = match os { "macos" => &[".dmg", ".pkg"], "windows" => &[".msi", ".exe", ".zip"], "android" => &[".apk"], _ => &[] };
+    let ext_rank: &[&str] = match os { "macos" => &[".dmg", ".pkg"], "windows" => &[".zip", ".exe", ".msi"], "android" => &[".apk"], _ => &[] };
     for e in ext_rank {
         let hit = r.assets.iter().find(|a| {
             let n = a.name.to_lowercase();
@@ -138,8 +139,9 @@ mod tests {
     fn rel(names: &[&str]) -> Release { Release { tag_name: "v1".into(), published_at: None, draft: false, prerelease: false, assets: names.iter().map(|n| Asset { name: n.to_string(), size: 1, url: String::new() }).collect() } }
     #[test]
     fn picks_the_right_installer() {
-        let r = rel(&["PartiChart-1.0.1-win-x64-portable.zip", "PartiChart-1.0.1-x64.msi", "SHA256SUMS.txt"]);
-        assert_eq!(pick_asset(&r, "windows").unwrap().name, "PartiChart-1.0.1-x64.msi");
+        let r = rel(&["DriveBox-1.0.2-x64.msi", "DriveBox-1.0.2-win-x64-portable.zip", "SHA256SUMS.txt"]);
+        assert_eq!(pick_asset(&r, "windows").unwrap().name, "DriveBox-1.0.2-win-x64-portable.zip");
+        assert_eq!(pick_asset(&rel(&["DriveBox-1.0.2-x64.msi"]), "windows").unwrap().name, "DriveBox-1.0.2-x64.msi");
         assert!(pick_asset(&r, "macos").is_none());
         assert_eq!(sums_asset(&r).unwrap().name, "SHA256SUMS.txt");
         assert_eq!(pick_asset(&rel(&["PortalAgent.exe"]), "windows").unwrap().name, "PortalAgent.exe");

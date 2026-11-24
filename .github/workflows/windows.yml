@@ -5,6 +5,8 @@ on:
     tags: ['v*']
 permissions:
   contents: write   # lets a v* tag create the release
+  id-token: write   # signed proof of origin
+  attestations: write
 jobs:
   windows:
     runs-on: windows-latest
@@ -28,6 +30,11 @@ jobs:
         run: |
           Compress-Archive target/release/boxlauncher.exe BoxLauncher-${{ steps.ver.outputs.v }}-windows-portable.zip
           Get-FileHash -Algorithm SHA256 BoxLauncher-*.msi, BoxLauncher-*.zip | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Set-Content SHA256SUMS.txt
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            BoxLauncher-*.msi
+            BoxLauncher-*.zip
       - uses: actions/upload-artifact@v4
         with:
           name: BoxLauncher-windows

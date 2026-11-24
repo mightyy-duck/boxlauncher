@@ -4,7 +4,7 @@ One place to install, update and open the apps of the suite: PaperBox, LinkedBox
 A small native app (Rust + egui, no web view), like the ArtCraft Launcher it is modelled on.
 
 - **Cards or table** of every app with its status, installed version, latest release and date.
-- **Install / Update** from the app's GitHub releases: picks the right file for the OS (`.dmg` on macOS, `.msi` / `.exe` / portable `.zip` on Windows, `.apk` for the phone app),
+- **Install / Update** from the app's GitHub releases: picks the right file for the OS (`.dmg` on macOS, portable `.zip` first, then `.exe` / `.msi` on Windows (the zip needs no administrator rights and works on PCs that block installers), `.apk` for the phone app),
   downloads it and checks it against the release's `SHA256SUMS.txt` before installing. A file that does not match is deleted and nothing is installed.
 - **Open** an installed app, or show it in Finder / Explorer.
 - Apps without a public release for this computer yet (PaperBox, NodeBox, and DriveBox on a Mac) are listed and opened from the copy installed here. DriveBox runs on Windows and macOS.

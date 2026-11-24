@@ -9,8 +9,8 @@
     "accent": [120, 205, 190], "icon": "linkedbox", "repo": "mightyy-duck/linkedbox-app", "platforms": ["ios", "android"], "ios_bundle": "com.example.portalAgentX", "android_pkg": "com.example.portal_agent_x", "ios_project": "~/workstation/code/linkedbox-app/ios/Runner.xcworkspace",
     "note": "Phone app: iPhone is built from Xcode (wirelessly), Android uses the APK from the releases. The launcher looks at which phone is paired. Private app: unlocks with a license code." },
   { "id": "drivebox", "readme": "mightyy-duck/drivebox", "name": "DriveBox", "tagline": "Disk usage dashboard: partition and folder maps, charts, temperatures.",
-    "accent": [255, 176, 112], "icon": "drivebox", "repo": "mightyy-duck/drivebox", "platforms": ["windows", "macos"], "mac_app": "DriveBox.app", "win_exe": "PartiChart.exe",
-    "note": "Windows and macOS (formerly PartiChart). The Windows installer comes from the releases; the Mac app is opened from this computer until a macOS release is published." },
+    "accent": [255, 176, 112], "icon": "drivebox", "repo": "mightyy-duck/drivebox", "platforms": ["windows", "macos"], "mac_app": "DriveBox.app", "win_exe": "DriveBox.exe",
+    "note": "Windows and macOS. On Windows it installs the portable download (no administrator rights, no installer); the Mac app is opened from this computer until a macOS release is published." },
   { "id": "nodebox", "readme": "mightyy-duck/nodebox", "name": "NodeBox", "tagline": "See how a Node project really works: routes, data flows and call chains.",
     "accent": [255, 123, 98], "icon": "nodebox", "platforms": ["macos", "windows"], "mac_app": "NodeBox.app", "win_exe": "NodeBox.exe",
     "note": "No public releases yet. Opens the copy installed on this computer." }

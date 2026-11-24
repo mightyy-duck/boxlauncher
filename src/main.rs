@@ -35,6 +35,8 @@ struct Row {
     found: Option<install::Found>,
     fetch: Fetch,
     job: Option<Job>,
+    /// a re-check is running; the old answer stays on screen until the new one arrives
+    checking: bool,
     /// (is_error, text) shown on the card until the next action
     notice: Option<(bool, String)>,
 }
@@ -103,7 +105,7 @@ impl App {
         tex.insert("linkedbox".to_string(), cc.egui_ctx.load_texture("linkedbox", decode(ICON_LINKEDBOX), Default::default()));
         tex.insert("drivebox".to_string(), cc.egui_ctx.load_texture("drivebox", decode(ICON_DRIVEBOX), Default::default()));
         let logo = cc.egui_ctx.load_texture("logo", decode(ICON_LAUNCHER), Default::default());
-        let rows = catalog::load().into_iter().map(|app| Row { found: install::find(&app, &state), fetch: if app.repo.is_some() { Fetch::Loading } else { Fetch::None }, app, job: None, notice: None }).collect();
+        let rows = catalog::load().into_iter().map(|app| Row { found: install::find(&app, &state), fetch: if app.repo.is_some() { Fetch::Loading } else { Fetch::None }, app, job: None, checking: false, notice: None }).collect();
         let mut a = App { cfg, state, rows, tex, logo, tx: Tx(tx, cc.egui_ctx.clone()), rx, settings: false, sort: 0, was_focused: true, shot: shot.map(|p| (p, std::time::Instant::now())) };
         style(&cc.egui_ctx, a.cfg.dark);
         a.refresh_releases();
@@ -113,7 +115,8 @@ impl App {
         let token = self.cfg.github_token();
         for r in &mut self.rows {
             if let Some(repo) = r.app.repo.clone() {
-                r.fetch = Fetch::Loading;
+                r.checking = true;
+                if matches!(r.fetch, Fetch::None) { r.fetch = Fetch::Loading; }
                 let (tx, id, tk) = (self.tx.clone(), r.app.id.clone(), token.clone());
                 std::thread::spawn(move || { let res = github::latest(&repo, tk.as_deref()); tx.send(Msg::Release(id, res)); });
             }
@@ -123,7 +126,7 @@ impl App {
     fn pump(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
-                Msg::Release(id, res) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.fetch = match res { Ok(x) => Fetch::Ok(x), Err(e) => Fetch::Err(e) }; },
+                Msg::Release(id, res) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { { r.checking = false; r.fetch = match res { Ok(x) => Fetch::Ok(x), Err(e) => Fetch::Err(e) }; } },
                 Msg::Progress(id, f, t) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.job = Some(Job { frac: f, text: t }); },
                 Msg::Done(id, res) => {
                     let mut st = None;
@@ -300,7 +303,7 @@ impl eframe::App for App {
         let dark = self.cfg.dark;
         let (_, panel, line, _, dim) = palette(dark);
         let mut acts: Vec<Act> = vec![];
-        let busy = self.rows.iter().any(|r| r.job.is_some() || matches!(r.fetch, Fetch::Loading));
+        let busy = self.rows.iter().any(|r| r.job.is_some() || r.checking || matches!(r.fetch, Fetch::Loading));
 
         egui::TopBottomPanel::top("top").frame(egui::Frame::new().fill(panel).stroke(Stroke::new(1.0, line)).inner_margin(egui::Margin::symmetric(20, 14))).show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -310,6 +313,7 @@ impl eframe::App for App {
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Settings").clicked() { self.settings = !self.settings; }
                     if ui.button(if dark { "Light" } else { "Dark" }).clicked() { self.cfg.dark = !dark; self.cfg.save(); style(ctx, self.cfg.dark); }
+                    if busy { ui.spinner(); }
                     if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() { self.refresh_installed(); self.refresh_releases(); }
                     ui.add_space(8.0);
                     if ui.selectable_label(self.cfg.table, "Table").clicked() { self.cfg.table = true; self.cfg.save(); }

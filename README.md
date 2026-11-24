@@ -23,7 +23,7 @@ Built in (`catalog.json`). Put your own `~/.boxlauncher/catalog.json` to replace
     cargo test                     # unit tests; add -- --ignored for a real download check
     scripts/bundle-mac.sh          # dist/BoxLauncher.app
 
-Needs Rust 1.85+. Windows: `cargo build --release` gives `boxlauncher.exe`; an MSI wrapper is not set up yet.
+Needs Rust 1.85+. Windows: `cargo build --release` gives `boxlauncher.exe` (icon embedded). The workflow `.github/workflows/windows.yml` (run it by hand from the Actions tab, or push a `v*` tag) builds `BoxLauncher-<version>-x64.msi` with WiX (`packaging/boxlauncher.wxs`) plus a portable zip and a SHA-256 file.
 
 ## Not done yet
 

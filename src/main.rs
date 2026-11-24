@@ -1,3 +1,5 @@
+// no console window behind the app on Windows
+#![cfg_attr(windows, windows_subsystem = "windows")]
 mod catalog;
 mod cfg;
 mod github;

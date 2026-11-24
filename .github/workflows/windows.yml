@@ -1,0 +1,40 @@
+name: Windows build
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Version from Cargo.toml
+        id: ver
+        shell: bash
+        run: echo "v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix build packaging/boxlauncher.wxs -d Version=${{ steps.ver.outputs.v }} -arch x64 -o BoxLauncher-${{ steps.ver.outputs.v }}-x64.msi
+      - name: Portable zip + SHA-256 sums
+        shell: pwsh
+        run: |
+          Compress-Archive target/release/boxlauncher.exe BoxLauncher-${{ steps.ver.outputs.v }}-windows-portable.zip
+          Get-FileHash -Algorithm SHA256 BoxLauncher-*.msi, BoxLauncher-*.zip | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } | Set-Content SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BoxLauncher-windows
+          path: |
+            BoxLauncher-*.msi
+            BoxLauncher-*.zip
+            SHA256SUMS.txt
+      - name: Attach to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: gh release create "${GITHUB_REF_NAME}" BoxLauncher-*.msi BoxLauncher-*.zip SHA256SUMS.txt --generate-notes || gh release upload "${GITHUB_REF_NAME}" BoxLauncher-*.msi BoxLauncher-*.zip SHA256SUMS.txt --clobber

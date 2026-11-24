@@ -9,6 +9,9 @@ pub struct AppDef {
     pub accent: [u8; 3],
     #[serde(default)]
     pub icon: Option<String>,
+    /// "owner/name" of the repository whose README the card shows when clicked (defaults to `repo`)
+    #[serde(default)]
+    pub readme: Option<String>,
     /// "owner/name" of the GitHub repository whose releases hold the installers
     #[serde(default)]
     pub repo: Option<String>,

@@ -25,6 +25,7 @@ enum Msg {
     Progress(String, f32, String),
     Done(String, Result<(String, PathBuf, String), String>),
     Phones(String, Vec<phone::Phone>),
+    Readme(String, Result<String, String>),
     PhoneApp(String, String, phone::On, bool),
 }
 #[derive(Clone)]
@@ -88,7 +89,7 @@ fn status_label(s: Status, app: &AppDef) -> (String, Color32) {
     }
 }
 
-enum Act { Xcode(usize), Install(usize), Open(usize), Reveal(usize), Settings }
+enum Act { Details(usize), Xcode(usize), Install(usize), Open(usize), Reveal(usize), Settings }
 
 struct App {
     cfg: Config,
@@ -102,6 +103,13 @@ struct App {
     sort: usize,
     was_focused: bool,
     shot: Option<(String, std::time::Instant)>,
+    /// row whose README window is open
+    detail: Option<usize>,
+    readmes: HashMap<String, Result<String, String>>,
+    reading: std::collections::HashSet<String>,
+    md: egui_commonmark::CommonMarkCache,
+    /// natural height of each card, measured last frame (rows are laid out with it)
+    heights: Vec<f32>,
 }
 
 fn decode(bytes: &[u8]) -> egui::ColorImage {
@@ -121,10 +129,11 @@ impl App {
         tex.insert("drivebox".to_string(), cc.egui_ctx.load_texture("drivebox", decode(ICON_DRIVEBOX), Default::default()));
         let logo = cc.egui_ctx.load_texture("logo", decode(ICON_LAUNCHER), Default::default());
         let rows = catalog::load().into_iter().map(|app| Row { found: install::find(&app, &state), fetch: if app.repo.is_some() { Fetch::Loading } else { Fetch::None }, app, job: None, checking: false, phones: None, notice: None }).collect();
-        let mut a = App { cfg, state, rows, tex, logo, tx: Tx(tx, cc.egui_ctx.clone()), rx, settings: false, sort: 0, was_focused: true, shot: shot.map(|p| (p, std::time::Instant::now())) };
+        let mut a = App { cfg, state, rows, tex, logo, tx: Tx(tx, cc.egui_ctx.clone()), rx, settings: false, sort: 0, was_focused: true, shot: shot.map(|p| (p, std::time::Instant::now())), detail: None, readmes: HashMap::new(), reading: Default::default(), md: Default::default(), heights: vec![270.0; 8] };
         style(&cc.egui_ctx, a.cfg.dark);
         a.refresh_releases();
         a.refresh_phones();
+        if let Ok(d) = std::env::var("BOX_DEMO_DETAIL") { if let Some(i) = a.rows.iter().position(|r| r.app.id == d) { a.open_details(i); } }
         a
     }
     fn refresh_phones(&mut self) {
@@ -151,12 +160,22 @@ impl App {
             }
         }
     }
+    fn open_details(&mut self, i: usize) {
+        self.detail = Some(i);
+        let r = &self.rows[i];
+        let Some(repo) = r.app.readme.clone().or(r.app.repo.clone()) else { return };
+        if self.readmes.contains_key(&r.app.id) || self.reading.contains(&r.app.id) { return; }
+        self.reading.insert(r.app.id.clone());
+        let (tx, id, tk) = (self.tx.clone(), r.app.id.clone(), self.cfg.github_token());
+        std::thread::spawn(move || { let res = github::readme(&repo, tk.as_deref()); tx.send(Msg::Readme(id, res)); });
+    }
     fn refresh_installed(&mut self) { for r in &mut self.rows { r.found = install::find(&r.app, &self.state); } }
     fn pump(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Release(id, res) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { { r.checking = false; r.fetch = match res { Ok(x) => Fetch::Ok(x), Err(e) => Fetch::Err(e) }; } },
                 Msg::Phones(id, v) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.phones = Some(v); },
+                Msg::Readme(id, res) => { self.reading.remove(&id); self.readmes.insert(id, res); }
                 Msg::PhoneApp(id, dev, on, ok) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { if let Some(p) = r.phones.as_mut().and_then(|ps| ps.iter_mut().find(|p| p.id == dev)) { p.checking = false; p.has_app = on; p.reachable = ok; } },
                 Msg::Progress(id, f, t) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.job = Some(Job { frac: f, text: t }); },
                 Msg::Done(id, res) => {
@@ -180,6 +199,7 @@ impl App {
         match a {
             Act::Open(i) => { let r = &mut self.rows[i]; r.notice = None; if let Some(f) = &r.found { if let Err(e) = install::open(f) { r.notice = Some((true, e)); } } }
             Act::Settings => { self.settings = true; }
+            Act::Details(i) => self.open_details(i),
             Act::Xcode(i) => {
                 let r = &mut self.rows[i]; r.notice = None;
                 let path = r.app.ios_project.clone().map(|p| p.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)).filter(|p| std::path::Path::new(p).exists());
@@ -310,11 +330,52 @@ fn phone_text(r: &Row) -> String {
     }).collect::<Vec<_>>().join("\n")
 }
 
-fn card(ui: &mut egui::Ui, i: usize, r: &Row, w: f32, dark: bool, tex: Option<&TextureHandle>, acts: &mut Vec<Act>) {
+/// One card in its slot. Hovering grows it a little (the card is drawn in its own transformed layer),
+/// clicking the card (not a button) opens its README. Returns the natural height of the card.
+/// the viewer shows markdown only: turn `<h1 align=..>Title</h1>` into a heading and drop lines that are pure HTML (<p><img ..></p>, <br>, <div>)
+fn clean_md(src: &str) -> String {
+    let strip = |l: &str| { let (mut out, mut inside) = (String::new(), false); for c in l.chars() { match c { '<' => inside = true, '>' => inside = false, _ if !inside => out.push(c), _ => {} } } out.trim().to_string() };
+    let mut out = String::new();
+    let mut in_code = false;
+    for l in src.lines() {
+        let t = l.trim();
+        if t.starts_with("```") { in_code = !in_code; }
+        if in_code || t.starts_with("```") { out.push_str(l); out.push('\n'); continue; }
+        let low = t.to_lowercase();
+        let lvl = ["<h1", "<h2", "<h3"].iter().position(|h| low.starts_with(h));
+        if let Some(n) = lvl { let x = strip(t); if !x.is_empty() { out.push_str(&format!("{} {}\n", "#".repeat(n + 1), x)); } }
+        else if t.starts_with('<') && t.ends_with('>') && !t.starts_with("<http") { continue; }
+        else { out.push_str(l); out.push('\n'); }
+    }
+    out
+}
+
+fn card(ui: &mut egui::Ui, i: usize, r: &Row, slot: egui::Rect, dark: bool, tex: Option<&TextureHandle>, acts: &mut Vec<Act>, hover_on: bool) -> f32 {
     let (_, panel, line, _, dim) = palette(dark);
-    egui::Frame::new().fill(panel).stroke(Stroke::new(1.0, line)).corner_radius(14).inner_margin(16).show(ui, |ui| {
-        ui.set_width(w - 34.0); ui.set_min_height(236.0);
-        ui.vertical(|ui| {
+    let ctx = ui.ctx().clone();
+    let id = egui::Id::new(("card", &r.app.id));
+    let demo = std::env::var("BOX_DEMO_HOVER").ok().as_deref() == Some(r.app.id.as_str());
+    let over = demo || hover_on && ctx.input(|i| i.pointer.hover_pos()).map_or(false, |p| slot.expand(2.0).contains(p) && ui.clip_rect().contains(p));
+    let t = ctx.animate_bool_with_time(id.with("hover"), over, 0.14);
+    let t = t * t * (3.0 - 2.0 * t);
+    let layout = egui::Layout::top_down(Align::Min);
+    let mut child = if t > 0.002 {
+        let layer = egui::LayerId::new(egui::Order::Middle, id.with("layer"));
+        let scale = 1.0 + 0.04 * t;
+        ctx.set_transform_layer(layer, egui::emath::TSTransform::new(slot.center().to_vec2() * (1.0 - scale) - Vec2::new(0.0, 5.0 * t), scale));
+        let mut c = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(slot).layout(layout));
+        c.set_clip_rect(ui.clip_rect());
+        c
+    } else { ui.new_child(egui::UiBuilder::new().max_rect(slot).layout(layout)) };
+    let ui = &mut child;
+    let resp = ui.interact(slot, id.with("click"), Sense::click());
+    if resp.clicked() { acts.push(Act::Details(i)); }
+    if over { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
+    let shadow = egui::epaint::Shadow { offset: [0, (8.0 * t) as i8], blur: (26.0 * t) as u8, spread: 0, color: Color32::from_black_alpha((150.0 * t) as u8) };
+    let mut natural = 270.0;
+    egui::Frame::new().fill(panel.lerp_to_gamma(Color32::WHITE, 0.035 * t)).stroke(Stroke::new(1.0 + t, line.lerp_to_gamma(accent(&r.app), 0.75 * t))).shadow(shadow).corner_radius(14).inner_margin(16).show(ui, |ui| {
+        ui.set_width(slot.width() - 34.0); ui.set_min_height((slot.height() - 34.0).max(236.0));
+        natural = ui.vertical(|ui| {
         let locked = r.status() == Status::Locked;
         let mut badge: Option<egui::Rect> = None;
         if locked { ui.set_opacity(0.5); }
@@ -347,8 +408,9 @@ fn card(ui: &mut egui::Ui, i: usize, r: &Row, w: f32, dark: bool, tex: Option<&T
         if locked { ui.set_opacity(1.0); }
         if let Some(tr) = badge { let c = tr.right_bottom() - Vec2::new(4.0, 4.0); ui.painter().circle_filled(c, 12.0, panel); ui.painter().circle_stroke(c, 12.0, Stroke::new(1.5, accent(&r.app))); lock_icon(ui.painter(), c, 15.0, accent(&r.app)); }
         ui.horizontal(|ui| buttons(ui, i, r, acts));
-        });
+        }).response.rect.height() + 34.0;
     });
+    natural.max(270.0)
 }
 
 impl eframe::App for App {
@@ -371,7 +433,7 @@ impl eframe::App for App {
                     if ui.button("Settings").clicked() { self.settings = !self.settings; }
                     if ui.button(if dark { "Light" } else { "Dark" }).clicked() { self.cfg.dark = !dark; self.cfg.save(); style(ctx, self.cfg.dark); }
                     if busy { ui.spinner(); }
-                    if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() { self.refresh_installed(); self.refresh_releases(); self.refresh_phones(); }
+                    if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() { self.refresh_installed(); self.refresh_releases(); self.refresh_phones(); self.readmes.clear(); }
                     ui.add_space(8.0);
                     if ui.selectable_label(self.cfg.table, "Table").clicked() { self.cfg.table = true; self.cfg.save(); }
                     if ui.selectable_label(!self.cfg.table, "Cards").clicked() { self.cfg.table = false; self.cfg.save(); }
@@ -393,16 +455,22 @@ impl eframe::App for App {
                     let cols = (((avail + gap) / (300.0 + gap)).floor() as usize).max(1);
                     let w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).clamp(290.0, 460.0);
                     ui.spacing_mut().item_spacing = Vec2::new(gap, gap);
+                    let hover_on = !self.settings && self.detail.is_none();
                     let vis: Vec<usize> = (0..self.rows.len()).collect();
+                    let mut measured: Vec<(usize, f32)> = vec![];
                     for chunk in vis.chunks(cols) {
-                        ui.horizontal_top(|ui| {
-                            for &i in chunk {
-                                let r = &self.rows[i];
-                                let tex = r.app.icon.as_ref().and_then(|n| self.tex.get(n));
-                                card(ui, i, r, w, dark, tex, &mut acts);
-                            }
-                        });
+                        let row_h = chunk.iter().map(|&i| self.heights.get(i).copied().unwrap_or(270.0)).fold(270.0, f32::max);
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(avail, row_h), Sense::hover());
+                        for (k, &i) in chunk.iter().enumerate() {
+                            let r = &self.rows[i];
+                            let tex = r.app.icon.as_ref().and_then(|n| self.tex.get(n));
+                            let slot = egui::Rect::from_min_size(rect.min + Vec2::new(k as f32 * (w + gap), 0.0), Vec2::new(w, row_h));
+                            measured.push((i, card(ui, i, r, slot, dark, tex, &mut acts, hover_on)));
+                        }
                     }
+                    let mut changed = false;
+                    for (i, h) in measured { if (self.heights[i] - h).abs() > 0.5 { self.heights[i] = h; changed = true; } }
+                    if changed { ctx.request_repaint(); }
                 } else {
                     let mut order: Vec<usize> = (0..self.rows.len()).collect();
                     let sort = self.sort;
@@ -414,7 +482,7 @@ impl eframe::App for App {
                         ui.end_row();
                         for i in order {
                             let r = &self.rows[i];
-                            ui.horizontal(|ui| { tile(ui, &r.app, r.app.icon.as_ref().and_then(|n| self.tex.get(n)), 28.0); ui.label(RichText::new(&r.app.name).strong()); });
+                            ui.horizontal(|ui| { tile(ui, &r.app, r.app.icon.as_ref().and_then(|n| self.tex.get(n)), 28.0); if ui.add(egui::Label::new(RichText::new(&r.app.name).strong()).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { acts.push(Act::Details(i)); } });
                             let (t, c) = status_label(r.status(), &r.app); chip(ui, &t, c);
                             ui.label(r.found.as_ref().and_then(|f| f.version.clone()).unwrap_or("-".into()));
                             ui.label(r.latest_tag().unwrap_or("-"));
@@ -441,7 +509,7 @@ impl eframe::App for App {
                 ui.label(RichText::new("The GITHUB_TOKEN environment variable counts as a license code too, if set.").size(12.0).color(dim));
                 if changed { self.cfg.save(); }
                 if ui.add(primary("Unlock", pal_accent())).clicked() { go = true; }
-                if go { self.cfg.save(); self.refresh_releases(); }
+                if go { self.cfg.save(); self.refresh_releases(); self.readmes.clear(); }
                 let hidden = self.rows.iter().filter(|r| r.locked()).count();
                 let has_code = self.cfg.github_token().is_some();
                 if has_code && !busy { ui.label(RichText::new(if hidden == 0 { "License code accepted: all apps are unlocked.".to_string() } else { format!("The code did not open {hidden} app{}.", if hidden == 1 { "" } else { "s" }) }).color(if hidden == 0 { Color32::from_rgb(76, 217, 163) } else { Color32::from_rgb(255, 120, 140) })); }
@@ -450,6 +518,39 @@ impl eframe::App for App {
                 ui.label(RichText::new(format!("Built in. Put a catalog.json in {} to replace it (same format as the built-in one).", cfg::home().display())).size(12.5).color(dim));
             });
             self.settings = open;
+        }
+
+        if let Some(i) = self.detail {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) { self.detail = None; }
+        }
+        if let Some(i) = self.detail {
+            let mut open = true;
+            let r = &self.rows[i];
+            let readme = self.readmes.get(&r.app.id).map(|x| x.as_ref().map(|t| clean_md(t)).map_err(|e| e.clone()));
+            let repo = r.app.readme.clone().or(r.app.repo.clone());
+            let tex = r.app.icon.as_ref().and_then(|n| self.tex.get(n));
+            let md = &mut self.md;
+            egui::Window::new(RichText::new(&r.app.name).strong()).open(&mut open).collapsible(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).default_size([760.0, 600.0]).resizable(true).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    tile(ui, &r.app, tex, 44.0);
+                    ui.vertical(|ui| {
+                        let (t, c) = status_label(r.status(), &r.app); chip(ui, &t, c);
+                        ui.label(RichText::new(&r.app.tagline).color(dim).size(13.0));
+                    });
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    buttons(ui, i, r, &mut acts);
+                    if let Some(rp) = &repo { if ui.button("View on GitHub").clicked() { ctx.open_url(egui::OpenUrl::new_tab(format!("https://github.com/{rp}"))); } }
+                });
+                ui.separator();
+                match readme {
+                    Some(Ok(text)) => { egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| { egui_commonmark::CommonMarkViewer::new().show(ui, md, &text); }); }
+                    Some(Err(e)) => { let e = &e; ui.label(RichText::new(if github::is_locked(e) { "This app is private: enter a license code in Settings to read its README.".to_string() } else { e.clone() }).color(Color32::from_rgb(255, 120, 140))); if github::is_locked(e) && ui.button("Enter license code").clicked() { acts.push(Act::Settings); } }
+                    None => { if repo.is_some() { ui.horizontal(|ui| { ui.spinner(); ui.label("Loading README…"); }); } else { ui.label(RichText::new("This app has no README to show yet.").color(dim)); } }
+                }
+            });
+            if !open { self.detail = None; }
         }
 
         for a in acts { self.act(a); }

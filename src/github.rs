@@ -46,6 +46,19 @@ pub fn latest(repo: &str, token: Option<&str>) -> Result<Release, String> {
     }
 }
 
+/// the README of a repository as markdown text
+pub fn readme(repo: &str, token: Option<&str>) -> Result<String, String> {
+    let mut rq = agent().get(&format!("https://api.github.com/repos/{repo}/readme")).set("Accept", "application/vnd.github.raw+json");
+    if let Some(t) = token { rq = rq.set("Authorization", &format!("Bearer {t}")); }
+    match rq.call() {
+        Ok(r) => { let mut s = String::new(); r.into_reader().take(1 << 20).read_to_string(&mut s).map_err(|e| e.to_string())?; Ok(s) }
+        Err(ureq::Error::Status(404, _)) => Err(if token.is_some() { "repository not found: this license code cannot open it".into() } else { "not found: needs a license code (Settings)".into() }),
+        Err(ureq::Error::Status(401, _)) => Err("the license code was refused".into()),
+        Err(ureq::Error::Status(c, _)) => Err(format!("GitHub answered {c}")),
+        Err(e) => Err(format!("no connection: {e}")),
+    }
+}
+
 fn get_asset(a: &Asset, token: Option<&str>) -> Result<Box<dyn Read + Send + Sync>, String> {
     let mut rq = agent().get(&a.url).set("Accept", "application/octet-stream");
     if let Some(t) = token { rq = rq.set("Authorization", &format!("Bearer {t}")); }

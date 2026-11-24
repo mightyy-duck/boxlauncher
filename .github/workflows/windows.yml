@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+permissions:
+  contents: write   # lets a v* tag create the release
 jobs:
   windows:
     runs-on: windows-latest

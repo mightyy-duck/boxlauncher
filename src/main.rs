@@ -2,6 +2,7 @@ mod catalog;
 mod cfg;
 mod github;
 mod install;
+mod phone;
 
 use catalog::AppDef;
 use cfg::{Config, Installed, State};
@@ -21,6 +22,8 @@ enum Msg {
     Release(String, Result<Release, String>),
     Progress(String, f32, String),
     Done(String, Result<(String, PathBuf, String), String>),
+    Phones(String, Vec<phone::Phone>),
+    PhoneApp(String, String, phone::On, bool),
 }
 #[derive(Clone)]
 struct Tx(Sender<Msg>, egui::Context);
@@ -37,20 +40,29 @@ struct Row {
     job: Option<Job>,
     /// a re-check is running; the old answer stays on screen until the new one arrives
     checking: bool,
+    /// phones found for a phone app (None until the first look)
+    phones: Option<Vec<phone::Phone>>,
     /// (is_error, text) shown on the card until the next action
     notice: Option<(bool, String)>,
 }
 #[derive(Clone, Copy, PartialEq)]
-enum Status { Update, Installed, NotInstalled, NotPublished, OtherOs, Android, Problem, Locked }
+enum Status { Iphone, Update, Installed, NotInstalled, NotPublished, OtherOs, Android, Problem, Locked }
 impl Row {
     /// private app that the launcher cannot see yet: it stays hidden until a license code opens it
     fn locked(&self) -> bool { matches!(&self.fetch, Fetch::Err(e) if github::is_locked(e)) }
     /// does the newest release have a file for this computer?
+    /// the paired iPhone, unless an Android phone is the one plugged in
+    fn ios_phone(&self) -> Option<&phone::Phone> {
+        let ps = self.phones.as_ref()?;
+        if ps.iter().any(|p| !p.ios) { return None; }
+        ps.iter().filter(|p| p.ios).min_by_key(|p| (!p.reachable, !p.checking))
+    }
     fn has_asset(&self) -> bool { match &self.fetch { Fetch::Ok(r) => github::pick_asset(r, if self.app.is_android() { "android" } else { catalog::os() }).is_some(), _ => false } }
     fn latest_tag(&self) -> Option<&str> { if let Fetch::Ok(r) = &self.fetch { Some(&r.tag_name) } else { None } }
     fn status(&self) -> Status {
+        if self.app.is_phone() { if let Some(p) = self.ios_phone() { let _ = p; return Status::Iphone; } }
         if self.locked() { return Status::Locked; }
-        if self.app.is_android() { return if matches!(self.fetch, Fetch::Err(_)) { Status::Problem } else { Status::Android }; }
+        if self.app.is_phone() { return if matches!(self.fetch, Fetch::Err(_)) { Status::Problem } else { Status::Android }; }
         if !self.app.runs_here() { return Status::OtherOs; }
         if let Some(f) = &self.found {
             if let (Some(l), Some(v)) = (self.latest_tag(), &f.version) { if self.has_asset() && github::newer(l, v) { return Status::Update; } }
@@ -67,13 +79,14 @@ fn status_label(s: Status, app: &AppDef) -> (String, Color32) {
         Status::NotInstalled => ("Not installed".into(), Color32::from_rgb(160, 160, 170)),
         Status::NotPublished => ("Not published yet".into(), Color32::from_rgb(160, 160, 170)),
         Status::OtherOs => (format!("{} only", app.platforms.iter().map(|p| match p.as_str() { "windows" => "Windows", "macos" => "macOS", o => o }).collect::<Vec<_>>().join(" / ")), Color32::from_rgb(160, 160, 170)),
-        Status::Android => ("Android app".into(), Color32::from_rgb(185, 164, 255)),
+        Status::Iphone => ("iPhone app".into(), Color32::from_rgb(185, 164, 255)),
+        Status::Android => ("Phone app".into(), Color32::from_rgb(185, 164, 255)),
         Status::Problem => ("Cannot check".into(), Color32::from_rgb(255, 84, 112)),
         Status::Locked => ("Locked".into(), Color32::from_rgb(160, 160, 170)),
     }
 }
 
-enum Act { Install(usize), Open(usize), Reveal(usize), Settings }
+enum Act { Xcode(usize), Install(usize), Open(usize), Reveal(usize), Settings }
 
 struct App {
     cfg: Config,
@@ -105,11 +118,25 @@ impl App {
         tex.insert("linkedbox".to_string(), cc.egui_ctx.load_texture("linkedbox", decode(ICON_LINKEDBOX), Default::default()));
         tex.insert("drivebox".to_string(), cc.egui_ctx.load_texture("drivebox", decode(ICON_DRIVEBOX), Default::default()));
         let logo = cc.egui_ctx.load_texture("logo", decode(ICON_LAUNCHER), Default::default());
-        let rows = catalog::load().into_iter().map(|app| Row { found: install::find(&app, &state), fetch: if app.repo.is_some() { Fetch::Loading } else { Fetch::None }, app, job: None, checking: false, notice: None }).collect();
+        let rows = catalog::load().into_iter().map(|app| Row { found: install::find(&app, &state), fetch: if app.repo.is_some() { Fetch::Loading } else { Fetch::None }, app, job: None, checking: false, phones: None, notice: None }).collect();
         let mut a = App { cfg, state, rows, tex, logo, tx: Tx(tx, cc.egui_ctx.clone()), rx, settings: false, sort: 0, was_focused: true, shot: shot.map(|p| (p, std::time::Instant::now())) };
         style(&cc.egui_ctx, a.cfg.dark);
         a.refresh_releases();
+        a.refresh_phones();
         a
+    }
+    fn refresh_phones(&mut self) {
+        for r in &mut self.rows {
+            if r.app.is_phone() {
+                let (tx, id, ib, ap) = (self.tx.clone(), r.app.id.clone(), r.app.ios_bundle.clone(), r.app.android_pkg.clone());
+                std::thread::spawn(move || {
+                    let v = phone::detect(ap.as_deref());
+                    let todo: Vec<String> = v.iter().filter(|p| p.ios && p.checking).map(|p| p.id.clone()).collect();
+                    tx.send(Msg::Phones(id.clone(), v));
+                    if let Some(b) = ib { for d in todo { let (tx, id, b) = (tx.clone(), id.clone(), b.clone()); std::thread::spawn(move || { let (on, ok) = phone::ios_has_app(&d, &b); tx.send(Msg::PhoneApp(id, d, on, ok)); }); } }
+                });
+            }
+        }
     }
     fn refresh_releases(&mut self) {
         let token = self.cfg.github_token();
@@ -127,6 +154,8 @@ impl App {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Release(id, res) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { { r.checking = false; r.fetch = match res { Ok(x) => Fetch::Ok(x), Err(e) => Fetch::Err(e) }; } },
+                Msg::Phones(id, v) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.phones = Some(v); },
+                Msg::PhoneApp(id, dev, on, ok) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { if let Some(p) = r.phones.as_mut().and_then(|ps| ps.iter_mut().find(|p| p.id == dev)) { p.checking = false; p.has_app = on; p.reachable = ok; } },
                 Msg::Progress(id, f, t) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.job = Some(Job { frac: f, text: t }); },
                 Msg::Done(id, res) => {
                     let mut st = None;
@@ -149,6 +178,12 @@ impl App {
         match a {
             Act::Open(i) => { let r = &mut self.rows[i]; r.notice = None; if let Some(f) = &r.found { if let Err(e) = install::open(f) { r.notice = Some((true, e)); } } }
             Act::Settings => { self.settings = true; }
+            Act::Xcode(i) => {
+                let r = &mut self.rows[i]; r.notice = None;
+                let path = r.app.ios_project.clone().map(|p| p.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)).filter(|p| std::path::Path::new(p).exists());
+                match path { Some(p) => { let _ = std::process::Command::new("open").args(["-a", "Xcode", &p]).spawn(); r.notice = Some((false, "Opened in Xcode: pick the iPhone and press Run to build it wirelessly.".into())); }
+                    None => r.notice = Some((true, "The Xcode project was not found on this computer.".into())) }
+            }
             Act::Reveal(i) => { if let Some(f) = &self.rows[i].found { install::reveal(&f.path); } }
             Act::Install(i) => {
                 let r = &mut self.rows[i];
@@ -247,11 +282,30 @@ fn buttons(ui: &mut egui::Ui, i: usize, r: &Row, acts: &mut Vec<Act>) {
         Status::Installed => { if ui.add(primary("Open", c)).clicked() { acts.push(Act::Open(i)); } if ui.button("Show").clicked() { acts.push(Act::Reveal(i)); } }
         Status::Update => { if ui.add(primary("Update", c)).clicked() { acts.push(Act::Install(i)); } if ui.button("Open").clicked() { acts.push(Act::Open(i)); } }
         Status::NotInstalled => { if ui.add_enabled(can && r.has_asset(), primary("Install", c)).clicked() { acts.push(Act::Install(i)); } }
+        Status::Iphone => { if ui.add(primary("Open in Xcode", c)).clicked() { acts.push(Act::Xcode(i)); } }
         Status::Android => { if ui.add_enabled(can, primary("Download APK", c)).clicked() { acts.push(Act::Install(i)); } }
         Status::Locked => { if ui.button("Enter license code").clicked() { acts.push(Act::Settings); } }
         Status::Problem => { ui.add_enabled(false, egui::Button::new("Unavailable")); }
         Status::NotPublished | Status::OtherOs => { ui.add_enabled(false, egui::Button::new("Not available")); }
     }
+}
+
+/// what the card says about the phone: which one, and whether the app is on it
+fn phone_text(r: &Row) -> String {
+    let Some(ps) = &r.phones else { return "Looking for your phone…".into() };
+    let shown: Vec<&phone::Phone> = if r.ios_phone().is_some() { ps.iter().filter(|p| p.ios).collect() } else { ps.iter().filter(|p| !p.ios).collect() };
+    if shown.is_empty() { return if ps.is_empty() { "No phone found: pair an iPhone in Xcode or plug in an Android phone (USB debugging).".into() } else { "No phone found.".into() }; }
+    shown.iter().map(|p| {
+        let kind = if p.ios { "iPhone" } else { "Android" };
+        let nm: String = p.model.chars().filter(|c| c.is_ascii()).collect();
+        let st = match (&p.has_app, p.reachable) {
+            _ if p.checking => "checking if the app is installed on it…".to_string(),
+            (phone::On::Yes, _) => "app installed on it".to_string(),
+            (phone::On::No, _) => "app not installed on it yet".to_string(),
+            _ => "asleep or out of reach: cannot check if the app is installed".to_string(),
+        };
+        if nm.starts_with(kind) { format!("{nm}: {st}") } else { format!("{kind} {nm}: {st}") }
+    }).collect::<Vec<_>>().join("\n")
 }
 
 fn card(ui: &mut egui::Ui, i: usize, r: &Row, w: f32, dark: bool, tex: Option<&TextureHandle>, acts: &mut Vec<Act>) {
@@ -274,15 +328,16 @@ fn card(ui: &mut egui::Ui, i: usize, r: &Row, w: f32, dark: bool, tex: Option<&T
         ui.label(RichText::new(&r.app.tagline).color(dim).size(13.5));
         ui.add_space(4.0);
         let inst = r.found.as_ref().and_then(|f| f.version.clone());
-        let line1 = match (&inst, r.latest_tag()) {
+        let phone_line = if r.app.is_phone() { Some(phone_text(r)) } else { None };
+        let line1 = if let Some(t) = phone_line.clone() { t } else { match (&inst, r.latest_tag()) {
             (Some(v), Some(l)) if !r.has_asset() => format!("Installed {v}  ·  no newer download for this computer"),
             (Some(v), Some(l)) => format!("Installed {v}  ·  latest {l}"),
             (Some(v), None) => format!("Installed {v}"),
             (None, Some(l)) if !r.has_asset() => format!("The latest release ({l}) has no download for this computer"),
             (None, Some(l)) => format!("Latest {l}{}", if let Fetch::Ok(x) = &r.fetch { format!("  ·  {}", date(x)) } else { String::new() }),
             _ => match &r.fetch { Fetch::Loading => "Checking for updates…".to_string(), Fetch::Err(_) if locked => "Locked: enter a license code to unlock this app".to_string(), Fetch::Err(e) => e.clone(), _ => String::new() },
-        };
-        if !line1.is_empty() { ui.label(RichText::new(line1).size(12.5).color(if matches!(r.fetch, Fetch::Err(_)) && inst.is_none() { Color32::from_rgb(255, 120, 140) } else { dim })); }
+        } };
+        if !line1.is_empty() { ui.label(RichText::new(line1).size(12.5).color(if phone_line.is_none() && matches!(r.fetch, Fetch::Err(_)) && inst.is_none() { Color32::from_rgb(255, 120, 140) } else { dim })); }
         if let Some(j) = &r.job { ui.add(egui::ProgressBar::new(j.frac).text(j.text.clone()).fill(accent(&r.app))); }
         if let Some((bad, n)) = &r.notice { ui.label(RichText::new(n).size(12.5).color(if *bad { Color32::from_rgb(255, 120, 140) } else { Color32::from_rgb(76, 217, 163) })); }
         else if let Some(n) = &r.app.note { if matches!(r.status(), Status::NotPublished | Status::OtherOs | Status::Problem | Status::Android) { ui.label(RichText::new(n).size(12.0).color(dim)); } }
@@ -303,7 +358,7 @@ impl eframe::App for App {
         let dark = self.cfg.dark;
         let (_, panel, line, _, dim) = palette(dark);
         let mut acts: Vec<Act> = vec![];
-        let busy = self.rows.iter().any(|r| r.job.is_some() || r.checking || matches!(r.fetch, Fetch::Loading));
+        let busy = self.rows.iter().any(|r| r.job.is_some() || r.checking || (r.app.is_phone() && r.phones.as_ref().map_or(true, |ps| ps.iter().any(|p| p.checking))) || matches!(r.fetch, Fetch::Loading));
 
         egui::TopBottomPanel::top("top").frame(egui::Frame::new().fill(panel).stroke(Stroke::new(1.0, line)).inner_margin(egui::Margin::symmetric(20, 14))).show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -314,7 +369,7 @@ impl eframe::App for App {
                     if ui.button("Settings").clicked() { self.settings = !self.settings; }
                     if ui.button(if dark { "Light" } else { "Dark" }).clicked() { self.cfg.dark = !dark; self.cfg.save(); style(ctx, self.cfg.dark); }
                     if busy { ui.spinner(); }
-                    if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() { self.refresh_installed(); self.refresh_releases(); }
+                    if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() { self.refresh_installed(); self.refresh_releases(); self.refresh_phones(); }
                     ui.add_space(8.0);
                     if ui.selectable_label(self.cfg.table, "Table").clicked() { self.cfg.table = true; self.cfg.save(); }
                     if ui.selectable_label(!self.cfg.table, "Cards").clicked() { self.cfg.table = false; self.cfg.save(); }
@@ -399,8 +454,8 @@ impl eframe::App for App {
 
         // screenshot mode for testing: wait until the checks answered, save one frame and quit
         if let Some((path, t0)) = self.shot.clone() {
-            let ready = !self.rows.iter().any(|r| matches!(r.fetch, Fetch::Loading));
-            if (ready && t0.elapsed().as_millis() > 1200) || t0.elapsed().as_secs() > 20 {
+            let ready = !self.rows.iter().any(|r| r.checking || (r.app.is_phone() && r.phones.as_ref().map_or(true, |ps| ps.iter().any(|p| p.checking))) || matches!(r.fetch, Fetch::Loading));
+            if (ready && t0.elapsed().as_millis() > 1200) || t0.elapsed().as_secs() > 45 {
                 if !ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Screenshot { .. }))) { ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default())); }
             }
             let img = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None }));

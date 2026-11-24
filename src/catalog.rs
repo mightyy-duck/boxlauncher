@@ -18,6 +18,13 @@ pub struct AppDef {
     pub mac_app: Option<String>,
     #[serde(default)]
     pub win_exe: Option<String>,
+    /// phone apps: iOS bundle id, Android package, Xcode workspace to build the iPhone app from
+    #[serde(default)]
+    pub ios_bundle: Option<String>,
+    #[serde(default)]
+    pub android_pkg: Option<String>,
+    #[serde(default)]
+    pub ios_project: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
 }
@@ -43,6 +50,7 @@ impl AppDef {
     pub fn runs_here(&self) -> bool {
         self.platforms.iter().any(|p| p == os())
     }
+    pub fn is_phone(&self) -> bool { self.platforms.iter().any(|p| p == "android" || p == "ios") }
     pub fn is_android(&self) -> bool {
         self.platforms.iter().any(|p| p == "android")
     }

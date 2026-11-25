@@ -1,7 +1,7 @@
 [
   { "id": "paperbox", "readme": "mightyy-duck/paperbox", "name": "PaperBox", "tagline": "Desktop whiteboard for sketches, diagrams and maps.",
     "accent": [244, 224, 122], "icon": "paperbox", "platforms": ["macos"], "mac_app": "PaperBox.app",
-    "note": "No public releases yet. Opens the copy installed on this computer." },
+    "note": "Installs from the GitHub releases: .dmg on a Mac (Apple silicon), a portable zip on Windows." },
   { "id": "linkedbox", "readme": "mightyy-duck/linkedbox", "name": "LinkedBox", "tagline": "Control your Windows PC from your phone: volume, media, cursor, apps, power.",
     "accent": [86, 168, 240], "icon": "linkedbox", "repo": "mightyy-duck/linkedbox", "platforms": ["windows"], "win_exe": "PortalAgent.exe",
     "note": "Windows tray agent (formerly Portal Agent). Private app: unlocks with a license code." },
@@ -11,7 +11,7 @@
   { "id": "drivebox", "readme": "mightyy-duck/drivebox", "name": "DriveBox", "tagline": "Disk usage dashboard: partition and folder maps, charts, temperatures.",
     "accent": [255, 176, 112], "icon": "drivebox", "repo": "mightyy-duck/drivebox", "platforms": ["windows", "macos"], "mac_app": "DriveBox.app", "win_exe": "DriveBox.exe",
     "note": "Windows and macOS. On Windows it installs the portable download (no administrator rights, no installer); the Mac app is opened from this computer until a macOS release is published." },
-  { "id": "nodebox", "readme": "mightyy-duck/nodebox", "name": "NodeBox", "tagline": "See how a Node project really works: routes, data flows and call chains.",
+  { "id": "nodebox", "readme": "mightyy-duck/nodebox", "repo": "mightyy-duck/nodebox", "name": "NodeBox", "tagline": "See how a Node project really works: routes, data flows and call chains.",
     "accent": [255, 123, 98], "icon": "nodebox", "platforms": ["macos", "windows"], "mac_app": "NodeBox.app", "win_exe": "NodeBox.exe",
-    "note": "No public releases yet. Opens the copy installed on this computer." }
+    "note": "Installs from the GitHub releases: .dmg on a Mac (Apple silicon), a portable zip on Windows." }
 ]

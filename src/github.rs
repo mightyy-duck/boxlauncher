@@ -145,6 +145,9 @@ mod tests {
         assert!(pick_asset(&r, "macos").is_none());
         assert_eq!(sums_asset(&r).unwrap().name, "SHA256SUMS.txt");
         assert_eq!(pick_asset(&rel(&["PortalAgent.exe"]), "windows").unwrap().name, "PortalAgent.exe");
+        let nb = rel(&["NodeBox-0.1.0-mac-arm64.dmg", "NodeBox-0.1.0-mac-arm64.zip", "NodeBox-0.1.0-win-x64.msi", "NodeBox-0.1.0-win-x64.zip", "SHA256SUMS.txt"]);
+        assert_eq!(pick_asset(&nb, "macos").unwrap().name, "NodeBox-0.1.0-mac-arm64.dmg");
+        assert_eq!(pick_asset(&nb, "windows").unwrap().name, "NodeBox-0.1.0-win-x64.zip");
         assert_eq!(pick_asset(&rel(&["x-1.0.apk"]), "android").unwrap().name, "x-1.0.apk");
         assert_eq!(pick_asset(&rel(&["App-1.0-mac.zip", "App.dmg"]), "macos").unwrap().name, "App.dmg");
     }

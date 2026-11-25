@@ -43,6 +43,17 @@ pub fn find(app: &AppDef, st: &State) -> Option<Found> {
     } else { None }
 }
 
+/// is the app running right now? (replacing a running app fails on Windows and would confuse it on a Mac)
+pub fn is_running(app: &AppDef) -> bool {
+    if cfg!(target_os = "macos") {
+        let Some(n) = &app.mac_app else { return false };
+        Command::new("pgrep").args(["-f", &format!("{n}/Contents/MacOS")]).output().map(|o| o.status.success()).unwrap_or(false)
+    } else if cfg!(target_os = "windows") {
+        let Some(e) = &app.win_exe else { return false };
+        Command::new("tasklist").args(["/FI", &format!("IMAGENAME eq {e}"), "/NH"]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains(&e.to_lowercase())).unwrap_or(false)
+    } else { false }
+}
+
 pub fn open(f: &Found) -> Result<(), String> {
     let r = if cfg!(target_os = "macos") { Command::new("open").arg(&f.path).spawn() }
         else if cfg!(target_os = "windows") { Command::new("cmd").args(["/C", "start", ""]).arg(&f.path).spawn() }
@@ -55,7 +66,7 @@ pub fn reveal(p: &Path) {
     else if cfg!(target_os = "windows") { let _ = Command::new("explorer").arg(format!("/select,{}", p.display())).spawn(); }
 }
 
-fn run(c: &mut Command, what: &str) -> Result<String, String> {
+pub(crate) fn run(c: &mut Command, what: &str) -> Result<String, String> {
     let o = c.output().map_err(|e| format!("{what}: {e}"))?;
     if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).to_string()) } else { Err(format!("{what} failed: {}", String::from_utf8_lossy(&o.stderr).trim())) }
 }
@@ -116,7 +127,7 @@ pub fn install(app: &AppDef, file: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn walk(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn walk(dir: &Path, name: &str) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
         if p.is_dir() { if let Some(f) = walk(&p, name) { return Some(f); } }

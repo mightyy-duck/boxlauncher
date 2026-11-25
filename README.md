@@ -32,3 +32,10 @@ Launcher self-update, tray icon, languages, Linux packaging, a Windows installer
 MIT licence.
 
 The lock icon is from [Lucide](https://lucide.dev) (ISC licence), drawn in code.
+
+## Updates
+
+Box Launcher looks for new versions when it starts, every 15 minutes, and when you come back to its window.
+- **Apps:** a card shows *Update available*; **Update** installs it, and **Update all (n)** updates every app that has a newer version. An app that is running must be closed first.
+- **Box Launcher itself:** a banner at the top offers **Update and restart**. It downloads the new release, checks it against the published SHA-256 file, swaps itself and restarts. `boxlauncher --update-self` does the same without a window.
+- Self-update works for the macOS app (Apple silicon) and the Windows portable exe. A copy installed with the `.msi` in Program Files cannot replace itself: install the new `.msi`.

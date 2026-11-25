@@ -5,6 +5,7 @@ mod cfg;
 mod github;
 mod install;
 mod phone;
+mod selfupdate;
 
 use catalog::AppDef;
 use cfg::{Config, Installed, State};
@@ -26,6 +27,9 @@ enum Msg {
     Done(String, Result<(String, PathBuf, String), String>),
     Phones(String, Vec<phone::Phone>),
     Readme(String, Result<String, String>),
+    SelfRelease(Result<Release, String>),
+    SelfProgress(f32, String),
+    SelfFailed(String),
     PhoneApp(String, String, phone::On, bool),
 }
 #[derive(Clone)]
@@ -89,9 +93,14 @@ fn status_label(s: Status, app: &AppDef) -> (String, Color32) {
     }
 }
 
-enum Act { Details(usize), Xcode(usize), Install(usize), Open(usize), Reveal(usize), Settings }
+enum Act { SelfUpdate, Details(usize), Xcode(usize), Install(usize), Open(usize), Reveal(usize), Settings }
+
+/// state of the launcher's own update
+enum SelfUp { None, Available(Release), Working(f32, String), Failed(String) }
 
 struct App {
+    selfup: SelfUp,
+    last_check: std::time::Instant,
     cfg: Config,
     state: State,
     rows: Vec<Row>,
@@ -129,12 +138,31 @@ impl App {
         tex.insert("drivebox".to_string(), cc.egui_ctx.load_texture("drivebox", decode(ICON_DRIVEBOX), Default::default()));
         let logo = cc.egui_ctx.load_texture("logo", decode(ICON_LAUNCHER), Default::default());
         let rows = catalog::load().into_iter().map(|app| Row { found: install::find(&app, &state), fetch: if app.repo.is_some() { Fetch::Loading } else { Fetch::None }, app, job: None, checking: false, phones: None, notice: None }).collect();
-        let mut a = App { cfg, state, rows, tex, logo, tx: Tx(tx, cc.egui_ctx.clone()), rx, settings: false, sort: 0, was_focused: true, shot: shot.map(|p| (p, std::time::Instant::now())), detail: None, readmes: HashMap::new(), reading: Default::default(), md: Default::default(), heights: vec![270.0; 8] };
+        let mut a = App { cfg, state, rows, tex, logo, tx: Tx(tx, cc.egui_ctx.clone()), rx, settings: false, sort: 0, was_focused: true, shot: shot.map(|p| (p, std::time::Instant::now())), detail: None, readmes: HashMap::new(), reading: Default::default(), md: Default::default(), heights: vec![270.0; 8], selfup: SelfUp::None, last_check: std::time::Instant::now() };
         style(&cc.egui_ctx, a.cfg.dark);
         a.refresh_releases();
         a.refresh_phones();
+        a.check_self();
         if let Ok(d) = std::env::var("BOX_DEMO_DETAIL") { if let Some(i) = a.rows.iter().position(|r| r.app.id == d) { a.open_details(i); } }
         a
+    }
+    fn check_self(&mut self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || { tx.send(Msg::SelfRelease(github::latest(selfupdate::REPO, None))); });
+    }
+    /// look again for new versions of everything (apps and the launcher)
+    fn recheck(&mut self) {
+        self.last_check = std::time::Instant::now();
+        self.refresh_releases(); self.refresh_phones(); self.check_self(); self.readmes.clear();
+    }
+    fn start_self_update(&mut self) {
+        let SelfUp::Available(rel) = &self.selfup else { return };
+        let rel = rel.clone();
+        self.selfup = SelfUp::Working(0.0, "Starting…".into());
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = self_update(&rel, |f, t| tx.send(Msg::SelfProgress(f, t))) { tx.send(Msg::SelfFailed(e)); }
+        });
     }
     fn refresh_phones(&mut self) {
         for r in &mut self.rows {
@@ -175,6 +203,14 @@ impl App {
             match m {
                 Msg::Release(id, res) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { { r.checking = false; r.fetch = match res { Ok(x) => Fetch::Ok(x), Err(e) => Fetch::Err(e) }; } },
                 Msg::Phones(id, v) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.phones = Some(v); },
+                Msg::SelfRelease(res) => if !matches!(self.selfup, SelfUp::Working(..)) {
+                    self.selfup = match res {
+                        Ok(rel) if github::newer(&rel.tag_name, env!("CARGO_PKG_VERSION")) && github::pick_asset(&rel, catalog::os()).is_some() && github::sums_asset(&rel).is_some() && selfupdate::can_update().is_ok() => SelfUp::Available(rel),
+                        _ => SelfUp::None,
+                    };
+                },
+                Msg::SelfProgress(f, t) => self.selfup = SelfUp::Working(f, t),
+                Msg::SelfFailed(e) => self.selfup = SelfUp::Failed(e),
                 Msg::Readme(id, res) => { self.reading.remove(&id); self.readmes.insert(id, res); }
                 Msg::PhoneApp(id, dev, on, ok) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { if let Some(p) = r.phones.as_mut().and_then(|ps| ps.iter_mut().find(|p| p.id == dev)) { p.checking = false; p.has_app = on; p.reachable = ok; } },
                 Msg::Progress(id, f, t) => if let Some(r) = self.rows.iter_mut().find(|r| r.app.id == id) { r.job = Some(Job { frac: f, text: t }); },
@@ -199,6 +235,7 @@ impl App {
         match a {
             Act::Open(i) => { let r = &mut self.rows[i]; r.notice = None; if let Some(f) = &r.found { if let Err(e) = install::open(f) { r.notice = Some((true, e)); } } }
             Act::Settings => { self.settings = true; }
+            Act::SelfUpdate => self.start_self_update(),
             Act::Details(i) => self.open_details(i),
             Act::Xcode(i) => {
                 let r = &mut self.rows[i]; r.notice = None;
@@ -218,8 +255,26 @@ impl App {
     }
 }
 
+/// download the new Box Launcher, verify it against the published SHA-256 sums, swap it in, restart. Returns only on error.
+fn self_update(rel: &Release, progress: impl Fn(f32, String)) -> Result<(), String> {
+    let asset = github::pick_asset(rel, catalog::os()).ok_or("this release has no file for this computer")?;
+    let dest = cfg::home().join("downloads").join("boxlauncher").join(&asset.name);
+    let mb = |b: u64| b as f64 / 1_048_576.0;
+    let got = github::download(asset, None, &dest, |d, t| progress(d as f32 / t.max(1) as f32, format!("Downloading {:.1} / {:.1} MB", mb(d), mb(t))))?;
+    progress(1.0, "Checking the checksum…".into());
+    let sums = github::sums_asset(rel).ok_or("this release publishes no checksum file: not installing")?;
+    let text = github::fetch_text(sums, None)?;
+    match github::expected_hash(&text, &asset.name) {
+        Some(want) if want == got => {}
+        _ => { let _ = std::fs::remove_file(&dest); return Err("the download does not match its published SHA-256: deleted, nothing changed".into()); }
+    }
+    progress(1.0, "Restarting…".into());
+    selfupdate::apply(&dest)
+}
+
 /// download, verify against the published SHA-256 sums, install
 fn install_job(app: &AppDef, rel: &Release, token: Option<&str>, tx: &Tx) -> Result<(String, PathBuf, String), String> {
+    if install::is_running(app) { return Err(format!("{} is running: close it, then press the button again.", app.name)); }
     let os = if app.is_android() { "android" } else { catalog::os() };
     let asset = github::pick_asset(rel, os).ok_or_else(|| format!("release {} has no installer for {os}", rel.tag_name))?;
     let dest = cfg::home().join("downloads").join(&app.id).join(&asset.name);
@@ -418,10 +473,16 @@ impl eframe::App for App {
         self.pump();
         let focused = ctx.input(|i| i.focused);
         if focused && !self.was_focused { self.refresh_installed(); }
+        let came_back = focused && !self.was_focused;
         self.was_focused = focused;
+        // new versions show up by themselves: every 15 minutes, and when the window comes back after 3 minutes
+        if self.shot.is_none() && (self.last_check.elapsed().as_secs() > 15 * 60 || (came_back && self.last_check.elapsed().as_secs() > 180)) && !matches!(self.selfup, SelfUp::Working(..)) { self.recheck(); }
         let dark = self.cfg.dark;
         let (_, panel, line, _, dim) = palette(dark);
         let mut acts: Vec<Act> = vec![];
+        let regained = focused && !self.was_focused;
+        let _ = regained;
+        let n_updates = self.rows.iter().filter(|r| r.status() == Status::Update && r.job.is_none()).count();
         let busy = self.rows.iter().any(|r| r.job.is_some() || r.checking || (r.app.is_phone() && r.phones.as_ref().map_or(true, |ps| ps.iter().any(|p| p.checking))) || matches!(r.fetch, Fetch::Loading));
 
         egui::TopBottomPanel::top("top").frame(egui::Frame::new().fill(panel).stroke(Stroke::new(1.0, line)).inner_margin(egui::Margin::symmetric(20, 14))).show(ctx, |ui| {
@@ -433,13 +494,34 @@ impl eframe::App for App {
                     if ui.button("Settings").clicked() { self.settings = !self.settings; }
                     if ui.button(if dark { "Light" } else { "Dark" }).clicked() { self.cfg.dark = !dark; self.cfg.save(); style(ctx, self.cfg.dark); }
                     if busy { ui.spinner(); }
-                    if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() { self.refresh_installed(); self.refresh_releases(); self.refresh_phones(); self.readmes.clear(); }
+                    if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() { self.refresh_installed(); self.recheck(); }
+                    if n_updates > 0 && !busy && ui.add(primary(&format!("Update all ({n_updates})"), pal_accent())).on_hover_text("Update every app that has a newer version").clicked() { for (i, r) in self.rows.iter().enumerate() { if r.status() == Status::Update && r.job.is_none() { acts.push(Act::Install(i)); } } }
                     ui.add_space(8.0);
                     if ui.selectable_label(self.cfg.table, "Table").clicked() { self.cfg.table = true; self.cfg.save(); }
                     if ui.selectable_label(!self.cfg.table, "Cards").clicked() { self.cfg.table = false; self.cfg.save(); }
                 });
             });
         });
+        if !matches!(self.selfup, SelfUp::None) {
+            egui::TopBottomPanel::top("selfup").frame(egui::Frame::new().fill(pal_accent().gamma_multiply(0.14)).stroke(Stroke::new(1.0, pal_accent().gamma_multiply(0.5))).inner_margin(egui::Margin::symmetric(20, 9))).show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    match &self.selfup {
+                        SelfUp::Available(rel) => {
+                            ui.label(RichText::new(format!("Box Launcher {} is available (you have v{}).", rel.tag_name, env!("CARGO_PKG_VERSION"))).strong());
+                            if ui.add(primary("Update and restart", pal_accent())).clicked() { acts.push(Act::SelfUpdate); }
+                            if ui.button("What's new").clicked() { ctx.open_url(egui::OpenUrl::new_tab(format!("https://github.com/{}/releases/tag/{}", selfupdate::REPO, rel.tag_name))); }
+                        }
+                        SelfUp::Working(f, t) => { ui.spinner(); ui.add(egui::ProgressBar::new(*f).text(format!("Updating Box Launcher: {t}")).desired_width(420.0).fill(pal_accent())); }
+                        SelfUp::Failed(e) => {
+                            ui.label(RichText::new(format!("Could not update Box Launcher: {e}")).color(Color32::from_rgb(255, 120, 140)));
+                            if ui.button("Open the download page").clicked() { ctx.open_url(egui::OpenUrl::new_tab(format!("https://github.com/{}/releases/latest", selfupdate::REPO))); }
+                            if ui.button("Dismiss").clicked() { self.selfup = SelfUp::None; }
+                        }
+                        SelfUp::None => {}
+                    }
+                });
+            });
+        }
         egui::TopBottomPanel::bottom("foot").frame(egui::Frame::new().fill(palette(dark).0).inner_margin(egui::Margin::symmetric(20, 8))).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Box Launcher {}  ·  downloads are checked against the release's SHA-256 file  ·  data folder {}", env!("CARGO_PKG_VERSION"), cfg::home().display())).size(11.5).color(dim));
@@ -568,7 +650,7 @@ impl eframe::App for App {
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
-        if busy { ctx.request_repaint_after(std::time::Duration::from_millis(120)); }
+        if busy || matches!(self.selfup, SelfUp::Working(..)) { ctx.request_repaint_after(std::time::Duration::from_millis(120)); } else { ctx.request_repaint_after(std::time::Duration::from_secs(60)); }
     }
 }
 
@@ -587,8 +669,21 @@ fn status_cli() {
 }
 
 fn main() -> eframe::Result {
+    selfupdate::cleanup_old();
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--status") { status_cli(); return Ok(()); }
+    // `boxlauncher --update-self`: the same update as the button, without a window (for scripts and tests)
+    if args.iter().any(|a| a == "--update-self") {
+        match github::latest(selfupdate::REPO, None) {
+            Ok(rel) if github::newer(&rel.tag_name, env!("CARGO_PKG_VERSION")) => {
+                println!("updating {} -> {}", env!("CARGO_PKG_VERSION"), rel.tag_name);
+                if let Err(e) = self_update(&rel, |f, t| eprint!("\r{t} {:.0}%   ", f * 100.0)) { eprintln!("\nfailed: {e}"); std::process::exit(1); }
+            }
+            Ok(rel) => println!("already up to date ({} is the newest)", rel.tag_name),
+            Err(e) => { eprintln!("cannot check: {e}"); std::process::exit(1); }
+        }
+        return Ok(());
+    }
     let shot = args.iter().position(|a| a == "--screenshot").and_then(|i| args.get(i + 1).cloned());
     let im = image::load_from_memory(ICON_LAUNCHER).expect("icon").to_rgba8();
     let icon = egui::IconData { width: im.width(), height: im.height(), rgba: im.into_raw() };
